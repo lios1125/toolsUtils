@@ -1,0 +1,247 @@
+import java.io.File;
+import java.io.IOException;
+import java.util.Iterator;
+import org.apache.poi.EncryptedDocumentException;
+import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
+
+	/**
+	 * <pre>
+	 * 功能描述:excel导入政策性产品，解析excel存放到数据库中
+	 * 特别说明:记录错误信息以及保存成功的个数，返回到前端
+	 * 主要思路:先获取表格对象的行，再获取列，对每列进行判断
+	 * 创建者:xz.lili
+	 * 创建时间:2019年9月23日 上午10:26:14
+	 * 修改者:xz.lili
+	 * 修改时间:2019年9月23日 上午10:26:14
+	 * 修改说明: 暂无
+	 * </pre>
+	 */
+	@Transactional(rollbackFor = Exception.class)
+	@Override
+	public Map<String, Object> parsePolicyExcelData(Map<String, Object> excelParam) throws BusinessException {
+		// 解析结果信息
+		StringBuffer errorMsg = new StringBuffer();
+		StringBuffer infoMsg = new StringBuffer();
+		Map<String, Object> returnMap = new HashMap<String, Object>();
+
+		// 标识系统是否有重复数据(默认为无)：
+		boolean sysRepeartDate = false;
+
+		// 太寿政策性产品对象集合
+		Map<String, PimsRiskPolicyMenu> policyMap = new HashMap<String, PimsRiskPolicyMenu>();
+		// 获取文件对象：
+		File excelFile = (File) excelParam.get("excelFile");
+		// 校验文件类型：
+		String fileName = excelFile.getName();
+		if (!(fileName.endsWith(".xls") || fileName.endsWith(".xlsx"))) {
+			errorMsg.append("文件格式不正确！");
+			returnMap.put("errorMsg", errorMsg.toString());
+			returnMap.put("infoMsg", infoMsg.toString());
+			return returnMap;
+		}
+
+		// 导入前，把上传导入重复的数据删除（重复数据，给用户提示后用户没处理的）
+		try {
+			tplbPolicyRiskManagerDao.deleteRepeartData();
+		} catch (BusinessException e) {
+			e.printStackTrace();
+			errorMsg.append("系统出错，请联系管理员！");
+			returnMap.put("errorMsg", errorMsg.toString());
+			returnMap.put("infoMsg", infoMsg.toString());
+			return returnMap;
+		}
+
+		// 先查询出需要关联pimsCodeList的对象数据：
+		Map<String, Object> statusMap = codeListDao.queryCodeByTypeName("产品状态");
+		Map<String, Object> mainFlagMap = codeListDao.queryCodeByTypeName("主附险类型");
+		Map<String, Object> designMap = codeListDao.queryCodeByTypeName("设计类型");
+		Map<String, Object> insDuraMap = codeListDao.queryCodeByTypeName("保险期限");
+		Map<String, Object> reportTypeMap = codeListDao.queryCodeByTypeName("产品管理类型");
+
+		// 根据专业公司查询销售渠道
+		Map<String, Object> companyMap = new HashMap<String, Object>();
+		Map<String, Object> channelMap = new HashMap<String, Object>();
+		companyMap.put("CSubCompanyCode", CommonConstant.COMPANY_CODE_TPL);
+		List<Map<String, Object>> channelList;
+		try {
+			channelList = codeListDao.queryDropDownCChannelName(companyMap);
+			if (CollectionUtils.isNotEmpty(channelList)) {
+				for (Map<String, Object> map : channelList) {
+					channelMap.put((String) map.get("CName"), map.get("CCode"));
+				}
+			}
+		} catch (Exception e1) {
+			e1.printStackTrace();
+		}
+
+		// 记录当前循环的行数
+		int nowRow = 0;
+		// 记录所有的险别
+		Map<String, Object> allRisk = new HashMap<String, Object>();
+		// 记录重复险别代码
+		Map<String, Object> repeartRisk = new HashMap<String, Object>();
+
+		// 生成当前上传的批次号，时间戳+6位随机数：
+		String exportCode = DateUtils.getTimeAndRandom(6);
+		try {
+			Workbook wb = WorkbookFactory.create(excelFile);
+			// 获取sheet对象（只有一页）
+			Sheet sheet = wb.iterator().next();
+			// 遍历行，
+			Iterator<Row> rowIterator = sheet.rowIterator();
+
+			// ***************************循环开始****************************************
+			while (rowIterator.hasNext()) {
+				// 行对象
+				Row row = rowIterator.next();
+				// 从第一行开始，第0行为表头：
+				if (row.getRowNum() == 0) {
+					continue;
+				}
+				// 当前循环的行数
+				nowRow = row.getRowNum();
+				// 获取总列数：
+				int columNum = row.getLastCellNum();
+				if (columNum != 24) {
+					errorMsg.append("excel不符合模板要求，请根据模板上传数据！");
+					break;
+				}
+				// 获取列：
+				Iterator<Cell> cellIterator = row.cellIterator();
+				PimsRiskPolicyMenu riskPolicy = new PimsRiskPolicyMenu();
+				
+				// 险别代码
+				Cell cell1 = cellIterator.next();
+				String cRiskCode = cell1.getStringCellValue().trim();
+				if (StringUtils.isNotBlank(cRiskCode)) {
+					riskPolicy.setcRiskCode(cRiskCode);
+				} else {
+					infoMsg.append("第" + row.getRowNum() + "行，险别代码为空，该行导入失败！");
+					continue;
+				}
+
+				//其它业务逻辑代码
+				//......
+				
+				// 是否政策性产品
+				Cell cell25 = cellIterator.next();
+				String cIsPolicy = cell25.getStringCellValue().trim();
+				if (StringUtils.isNotBlank(cIsPolicy)) {
+					if ("是".equals(cIsPolicy)) {
+						riskPolicy.setcIsPolicy("Y");
+					} else if ("否".equals(cIsPolicy)) {
+						riskPolicy.setcIsPolicy("N");
+					}
+				} else {
+					riskPolicy.setcIsPolicy("N");
+				}
+
+				// 菜单id
+				/*
+				 * Cell cell26 = cellIterator.next(); String cMenuId =
+				 * cell26.getStringCellValue().trim(); if
+				 * (StringUtils.isNotBlank(cMenuId)) {
+				 * riskPolicy.setcMenuId(cMenuId); }
+				 */
+
+				// 添加政策性产品对象到集合中：
+				riskPolicy.setCPkId(UUID.randomUUID().toString());
+				// 设置批次号：
+				riskPolicy.setcExportCode(exportCode);
+				policyMap.put(cRiskCode, riskPolicy);
+
+				// 判断是否有重复：
+				if (allRisk.get(cRiskCode) == null) {
+					allRisk.put(cRiskCode, String.valueOf(nowRow));
+				} else {
+					// 如果有重复，则把行号作为key保存
+					repeartRisk.put(allRisk.get(cRiskCode).toString(), cRiskCode);
+					repeartRisk.put(String.valueOf(nowRow), cRiskCode);
+				}
+			}
+			// ***************************循环结束****************************************
+
+			// 重复的不为空，不保存数据：
+			if (MapUtils.isNotEmpty(repeartRisk)) {
+				String repeartRow = "";
+				for (String rownum : repeartRisk.keySet()) {
+					repeartRow += rownum + "行、";
+				}
+				errorMsg.append("表格中第" + repeartRow.substring(0, repeartRow.length() - 1) + "险别代码重复，请检查！");
+				returnMap.put("errorMsg", errorMsg.toString());
+				returnMap.put("infoMsg", infoMsg.toString());
+				return returnMap;
+			}
+
+			// 校验数据库与表格数据是否重复：
+			String allRiskCode = "";
+			for (String riskCode : allRisk.keySet()) {
+				allRiskCode += "'" + riskCode + "',";
+			}
+
+			List<Map<String, Object>> repeartList = tplbPolicyRiskManagerDao
+					.checkIsRePeartByCode(allRiskCode.substring(0, allRiskCode.length() - 1));
+			String rePeartMsg = "";
+			if (CollectionUtils.isNotEmpty(repeartList)) {
+				// 标识系统有数据重复
+				sysRepeartDate = true;
+				rePeartMsg = "其中，有" + repeartList.size() + "条数据已存在，见列表黄色数据，请手动勾选是否更新！";
+				String repeartCode = "";
+				PimsRiskPolicyMenu policy = null;
+				for (Map<String, Object> riskCodeMap : repeartList) {
+					repeartCode = (String) riskCodeMap.get("cRiskCode");
+					policy = policyMap.get(repeartCode);
+					policy.setcIsTemData("1");
+					policyMap.put(repeartCode, policy);
+				}
+			}
+
+			// 保存政策性产品对象集合：
+			int saveNum = 0;
+			if (MapUtils.isNotEmpty(policyMap)) {
+				for (PimsRiskPolicyMenu policy : policyMap.values()) {
+					tplbPolicyRiskManagerDao.save(policy);
+					saveNum++;
+				}
+			}
+			/*
+			 * if (CollectionUtils.isNotEmpty(policyList)) { for
+			 * (PimsRiskPolicyMenu policy : policyList) {
+			 * tplbPolicyRiskManagerDao.save(policy); saveNum++; } }
+			 */
+			infoMsg.append("共成功导入" + saveNum + "条数据。");
+			infoMsg.append(rePeartMsg);
+		} catch (EncryptedDocumentException e) {
+			e.printStackTrace();
+			errorMsg.append("excel解析失败，excel解析错误！");
+		} catch (InvalidFormatException e) {
+			e.printStackTrace();
+			errorMsg.append("excel解析失败，excel解析错误！");
+		} catch (IOException e) {
+			e.printStackTrace();
+			errorMsg.append("excel解析失败，第" + nowRow + "发送文件传输错误！");
+		} catch (BusinessException e) {
+			e.printStackTrace();
+			errorMsg.append("excel解析失败，第" + nowRow + "日期格式转换错误！");
+		} catch (Exception e) {
+			e.printStackTrace();
+			// 未知异常
+			if (nowRow > 0) {
+				new BusinessException("excel解析失败，第" + nowRow + "行excel解析错误！");
+			} else {
+				new BusinessException("excel解析失败，excel解析错误！");
+			}
+			errorMsg.append("excel解析失败，excel解析错误！");
+		}
+
+		returnMap.put("errorMsg", errorMsg.toString());
+		returnMap.put("infoMsg", infoMsg.toString());
+		returnMap.put("sysRepeartDate", sysRepeartDate);
+		returnMap.put("exportCode", exportCode);
+		return returnMap;
+	}
